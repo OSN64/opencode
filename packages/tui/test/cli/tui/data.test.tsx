@@ -8,6 +8,7 @@ import { onMount } from "solid-js"
 import { ProjectProvider } from "../../../src/context/project"
 import { SDKProvider } from "../../../src/context/sdk"
 import { DataProvider, useData } from "../../../src/context/data"
+import { createSessionRows } from "../../../src/routes/session/rows"
 import { createApi, createClient, createEventStream, createFetch, directory, json } from "../../fixture/tui-sdk"
 import { TestTuiContexts } from "../../fixture/tui-environment"
 
@@ -109,11 +110,18 @@ test("refreshes resources into reactive getters", async () => {
 
 test("reconnects the event stream and bootstraps fresh data", async () => {
   const events = createEventStream()
-  const requests = { event: 0, model: 0 }
+  const requests = { active: 0, event: 0, model: 0 }
   const calls = createFetch((url) => {
     if (url.pathname === "/api/event") {
       requests.event++
       return events.v2()
+    }
+    if (url.pathname === "/api/session/active") {
+      requests.active++
+      return json({
+        data: requests.active === 1 ? { "session-stale": { type: "running" } } : {},
+        watermarks: {},
+      })
     }
     if (url.pathname !== "/api/model") return
     requests.model++
@@ -157,6 +165,7 @@ test("reconnects the event stream and bootstraps fresh data", async () => {
 
   try {
     await wait(() => data.location.model.list()?.[0]?.id === "model-1")
+    await wait(() => data.session.status("session-stale") === "running")
     expect(data.connection.status()).toBe("connected")
     expect(data.connection.attempt()).toBe(0)
 
@@ -166,6 +175,7 @@ test("reconnects the event stream and bootstraps fresh data", async () => {
     expect(data.connection.error()).toBe("Event stream disconnected")
 
     await wait(() => data.location.model.list()?.[0]?.id === "model-2", 4000)
+    await wait(() => data.session.status("session-stale") === "idle")
     expect(requests.event).toBe(2)
     expect(data.connection.status()).toBe("connected")
     expect(data.connection.attempt()).toBe(0)
@@ -352,6 +362,87 @@ test("tracks session status from active sessions and execution events", async ()
       },
     })
     await wait(() => data.session.status("session-failed") === "idle")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("completes exploration when a queued prompt is promoted", async () => {
+  const events = createEventStream()
+  const sessionID = "session-promotion"
+  const calls = createFetch((url) => {
+    if (url.pathname === `/api/session/${sessionID}/message`) return json({ data: [], cursor: {} })
+  }, events)
+  let rows!: ReturnType<typeof createSessionRows>
+
+  function Probe() {
+    rows = createSessionRows(() => sessionID)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider client={createClient(calls.fetch)} api={createApi(calls.fetch)}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    emitEvent(events, {
+      id: "evt_step_started",
+      created: 1,
+      type: "session.step.started",
+      durable: durable(sessionID),
+      data: {
+        sessionID,
+        assistantMessageID: "message-assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    })
+    emitEvent(events, {
+      id: "evt_tool_started",
+      created: 2,
+      type: "session.tool.input.started",
+      durable: durable(sessionID, 1),
+      data: {
+        sessionID,
+        assistantMessageID: "message-assistant",
+        callID: "call-read",
+        name: "read",
+      },
+    })
+    await wait(() => rows.some((row) => row.type === "group" && !row.completed))
+
+    emitEvent(events, {
+      id: "evt_prompt_admitted",
+      created: 3,
+      type: "session.prompt.admitted",
+      durable: durable(sessionID, 2),
+      data: {
+        sessionID,
+        inputID: "message-user",
+        prompt: { text: "Continue" },
+        delivery: "steer",
+      },
+    })
+    await wait(() => rows.some((row) => row.type === "message" && row.messageID === "message-user"))
+    expect(rows.find((row) => row.type === "group")?.completed).toBe(false)
+
+    emitEvent(events, {
+      id: "evt_prompt_promoted",
+      created: 4,
+      type: "session.prompt.promoted",
+      durable: durable(sessionID, 3),
+      data: { sessionID, inputID: "message-user" },
+    })
+    await wait(() => rows.find((row) => row.type === "group")?.completed === true)
+    expect(rows.at(-1)).toEqual({ type: "message", messageID: "message-user" })
   } finally {
     app.renderer.destroy()
   }

@@ -20,7 +20,7 @@ import type {
   SkillV2Info,
   V2Event,
 } from "@opencode-ai/sdk/v2"
-import { createStore, produce } from "solid-js/store"
+import { createStore, produce, reconcile } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import { useSDK } from "./sdk"
 import { createSignal, onCleanup } from "solid-js"
@@ -840,6 +840,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
 
     async function bootstrap() {
       if (bootstrapping) return bootstrapping
+      setStore("session", "status", reconcile({}))
       bootstrapping = Promise.allSettled([
         sdk.api.session
           .list({

@@ -69,11 +69,14 @@ export function createSessionRows(sessionID: Accessor<string>) {
     }),
   )
 
-  const appendMessage = (messageID: string) =>
+  const appendMessage = (messageID: string, queued = isQueued(messageID), promoted = false) =>
     setRows(
       produce((draft) => {
-        if (draft.some((row) => row.type === "message" && row.messageID === messageID)) return
-        const queued = isQueued(messageID)
+        const existing = draft.findIndex((row) => row.type === "message" && row.messageID === messageID)
+        if (existing !== -1) {
+          if (!promoted) return
+          draft.splice(existing, 1)
+        }
         const index = queued ? draft.length : queuedStart(draft)
         if (!queued) completePrevious(draft, index)
         draft.splice(index, 0, { type: "message", messageID })
@@ -129,12 +132,12 @@ export function createSessionRows(sessionID: Accessor<string>) {
   const message = (event: { id: string; data: { sessionID: string } }) => {
     if (event.data.sessionID === sessionID()) appendMessage(event.id.replace(/^evt_/, "msg_"))
   }
-  const input = (event: { data: { sessionID: string; inputID: string } }) => {
-    if (event.data.sessionID === sessionID()) appendMessage(event.data.inputID)
+  const input = (event: { data: { sessionID: string; inputID: string } }, queued: boolean, promoted = false) => {
+    if (event.data.sessionID === sessionID()) appendMessage(event.data.inputID, queued, promoted)
   }
   const subscriptions = [
-    data.on("session.prompt.admitted", input),
-    data.on("session.prompt.promoted", input),
+    data.on("session.prompt.admitted", (event) => input(event, true)),
+    data.on("session.prompt.promoted", (event) => input(event, false, true)),
     data.on("session.context.updated", message),
     data.on("session.synthetic", (event) => {
       if (event.data.sessionID === sessionID() && event.data.description?.trim())
