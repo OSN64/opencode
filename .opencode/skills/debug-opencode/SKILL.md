@@ -1,6 +1,6 @@
 ---
 name: debug-opencode
-description: Use when interactively running, debugging, auditing, or verifying opencode's own V2 CLI/TUI or server — including installed opencode2 sessions, next-channel databases, daemon ownership, termctrl reproduction, server APIs, logs, or Bun's inspector.
+description: Use when running, debugging, auditing, or verifying opencode's V2 CLI/TUI or server, including installed opencode2 sessions, termctrl reproduction, server APIs, logs, and Bun's inspector.
 ---
 
 # Debugging opencode itself
@@ -106,13 +106,7 @@ bun dev api <operationId> --param key=value
 
 ## Auditing an installed `opencode2` session
 
-Use this branch when given a real `ses_...` ID from the installed next-channel CLI. Keep the audit read-only and distinguish three layers:
-
-1. **Durable state** in the channel database: admitted prompts, projected messages, steps, and tool lifecycles.
-2. **Live server state** in the current daemon: process-local execution ownership and active sessions.
-3. **TUI projection** in `packages/tui/src/context/data.tsx` and session row/rendering code.
-
-Capture service identity before using `opencode2 api`; the API command may start a daemon when none is healthy.
+When given a real `ses_...` ID, first identify the installed service and channel database. `opencode2 api` may start a daemon when none is healthy, so inspect the registration before calling it.
 
 ```bash
 opencode2 --version
@@ -121,7 +115,7 @@ jq '{id,version,url,pid}' ~/.local/state/opencode/service.json
 ps -p "$(jq -r .pid ~/.local/state/opencode/service.json)" -o pid=,command=
 ```
 
-For the installed `next` channel, durable V2 state normally lives in `~/.local/share/opencode/opencode-next.db`. Database names are channel-scoped by `packages/core/src/database/database.ts`; `OPENCODE_DB` can override the path. Never assume `opencode-dev.db` or the legacy JSON storage contains the session. Locate an uncertain database by session ID without modifying it:
+The installed `next` channel normally uses `~/.local/share/opencode/opencode-next.db` and `~/.local/share/opencode/log/opencode.log`. `OPENCODE_DB` can override the database. Locate an uncertain database by Session ID without modifying it:
 
 ```bash
 SESSION=ses_...
@@ -130,7 +124,11 @@ for db in ~/.local/share/opencode/*.db; do
 done
 ```
 
-Inspect the live API first, then the durable event sequence. Use `opencode2 api` rather than manually copying the daemon password.
+Compare three sources before diagnosing the owner of a bug:
+
+- The live API for the current daemon's state.
+- The database's ordered `event` rows for durable history.
+- `packages/tui/src/context/data.tsx` and the relevant route for client projection and rendering.
 
 ```bash
 opencode2 api get /api/session/active
@@ -142,48 +140,7 @@ sqlite3 -separator $'\t' "file:$DB?mode=ro" \
   "select seq,type,datetime(created/1000,'unixepoch'),json_extract(data,'$.assistantMessageID'),json_extract(data,'$.callID'),json_extract(data,'$.finish'),json_extract(data,'$.error.message') from event where aggregate_id='$SESSION' order by seq;"
 ```
 
-Useful durable tables:
-
-- `event`: authoritative ordered session events; filter by `aggregate_id` and order by `seq`.
-- `session_message`: projected messages and their session sequence.
-- `message` and `part`: legacy projection tables still useful when auditing older migrated records; do not assume they are authoritative for current V2 execution.
-- `session_input`: durable prompt admission and delivery state.
-
-Do not dump image data or encrypted reasoning blobs into the transcript. Select event type, IDs, status, timestamps, and short text fields with SQL or `jq`.
-
-### Interruption semantics
-
-V2 execution ownership is process-local. `SessionRunCoordinator.interrupt(sessionID)` interrupts the current process's owner fiber; if the current daemon has no owner for that Session ID, interruption is intentionally a no-op. Therefore an HTTP `204` only proves the endpoint completed, not that work was interrupted.
-
-Use these signals together:
-
-- A durable `session.step.failed` with `error.message = "Step interrupted"` proves the active step finalized as interrupted.
-- `/api/session/active` describes ownership known to the current daemon only.
-- `session.execution.settled` drives TUI status back to idle but is **ephemeral** and is not stored in the `event` table.
-- Starting a newer CLI version intentionally replaces a healthy daemon whose registered version differs. Compare `opencode2 --version` with `service.json.version` before treating the daemon exit as an interrupt failure.
-- A daemon stop or replacement can interrupt work while the TUI misses the ephemeral settled event, leaving a stale running indicator.
-- An interrupt sent to a replacement daemon can return `204` while doing nothing because the old process owned the execution.
-
-When interruption looks ineffective, correlate the interrupt request, durable step failure, daemon run IDs, and service registration changes:
-
-```bash
-rg "session/$SESSION/interrupt|sessionID=$SESSION|serve.*--service|watcher stopped" \
-  ~/.local/share/opencode/log/opencode.log
-```
-
-Multiple `serve --service` starts and changing `run=` values in a short interval indicate daemon churn. Treat stale TUI status during that interval as a projection/transport issue until durable events prove otherwise.
-
-### TUI projection audit
-
-Compare durable and live state with:
-
-- `packages/tui/src/context/data.tsx` for SSE event application and session status.
-- `packages/tui/src/routes/session/rows.ts` for derived row grouping and queued-prompt placement.
-- `packages/tui/src/routes/session/index.tsx` for spinner/render conditions.
-
-On reconnect, verify that the `/api/session/active` snapshot clears locally cached sessions absent from the response. Solid store object updates merge unless replacement is explicit, so a merge can preserve a stale `running` entry after daemon replacement.
-
-Classify the result explicitly: durable execution bug, process-ownership/daemon issue, client event-loss issue, or derived rendering-state bug. An animation is not evidence that its underlying tool or Session is still running.
+Select event type, IDs, status, timestamps, and short text fields rather than dumping image data or encrypted reasoning blobs.
 
 ## Logs
 
@@ -205,7 +162,6 @@ grep 'role=server' ~/.local/share/opencode/log/opencode-local.log
 - `OPENCODE_LOG_LEVEL` controls verbosity (default `INFO`); set it before starting `bun dev` or `serve` to get `DEBUG` output for a specific repro.
 - `OPENCODE_PRINT_LOGS=1` additionally tees log output to stderr of the process that emitted it, which is useful when a process fails before you'd think to check the shared log file.
 - `termctrl logs <session>` surfaces stdout/stderr for a Terminal Control session specifically (e.g. inspector output or startup failures before the TUI renderer starts) — use the log file above for anything emitted by a separate server/daemon process instead.
-- Installed `opencode2` currently writes to `opencode.log` and normally uses `opencode-next.db`; local checkout runs write to `opencode-local.log` and use the database path selected by the local channel or `OPENCODE_DB`. Logs and databases do not follow the same filename rule, so inspect them independently.
 
 ## Debugger
 
